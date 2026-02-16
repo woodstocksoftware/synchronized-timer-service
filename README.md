@@ -5,8 +5,8 @@ Server-authoritative timer system for proctored testing. All clients receive syn
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green)
 ![WebSocket](https://img.shields.io/badge/WebSocket-Real--time-orange)
-![Tests](https://img.shields.io/badge/Tests-46_passing-brightgreen)
-![Coverage](https://img.shields.io/badge/Coverage-82%25-yellow)
+![Tests](https://img.shields.io/badge/Tests-66_passing-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-83%25-yellow)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Why This Exists
@@ -73,7 +73,7 @@ python3.12 -m venv venv
 source venv/bin/activate
 
 # Install
-pip install -r requirements.txt
+pip install -e .
 
 # Run
 python -m uvicorn src.server:app --reload --port 8003
@@ -84,6 +84,12 @@ API docs available at http://localhost:8003/docs (Swagger UI).
 ## API Reference
 
 ### REST Endpoints
+
+#### Health Check
+```http
+GET /health
+```
+Returns `{"status": "healthy", "timers_active": 5}`.
 
 #### Create Timer
 ```http
@@ -146,9 +152,11 @@ DELETE /timers/{timer_id}
 #### Bulk Operations
 
 ```http
-POST /timers/bulk/start    # Body: ["timer_id1", "timer_id2"]
-POST /timers/bulk/pause    # Body: ["timer_id1", "timer_id2"]
-POST /timers/bulk/extend?seconds=300  # Body: ["timer_id1", "timer_id2"]
+POST /timers/bulk/start    # Body: {"timer_ids": ["id1", "id2"]}
+POST /timers/bulk/pause    # Body: {"timer_ids": ["id1", "id2"]}
+POST /timers/bulk/resume   # Body: {"timer_ids": ["id1", "id2"]}
+POST /timers/bulk/stop     # Body: {"timer_ids": ["id1", "id2"]}
+POST /timers/bulk/extend   # Body: {"timer_ids": ["id1", "id2"], "seconds": 300}
 ```
 
 ### WebSocket
@@ -288,7 +296,7 @@ ruff check src/ tests/
 ruff format --check src/ tests/
 ```
 
-**Current:** 46 tests passing, 82% coverage.
+**Current:** 66 tests passing, 83% coverage.
 
 ## Configuration
 
