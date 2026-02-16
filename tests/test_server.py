@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient as StarletteTestClient
 
 from src.server import (
     MAX_TIMERS,
@@ -347,6 +348,14 @@ class TestCreateTimerAPI:
         assert data["created_at"].endswith("Z")
         assert "+00:00" not in data["created_at"]
 
+    async def test_create_timer_with_valid_custom_thresholds(self, client):
+        resp = await client.post(
+            "/timers",
+            json={"duration_seconds": 300, "warning_thresholds": [120, 60, 10]},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["warning_thresholds"] == [120, 60, 10]
+
     async def test_max_timers_returns_429(self, client):
         # Fill up to limit
         for i in range(MAX_TIMERS):
@@ -588,3 +597,179 @@ class TestBulkOperationsAPI:
         timer = manager.get_timer(tid)
         if timer and timer._task:
             timer._task.cancel()
+
+    async def test_bulk_pause_nonexistent(self, client):
+        resp = await client.post("/timers/bulk/pause", json={"timer_ids": ["nonexistent"]})
+        assert resp.status_code == 200
+        assert resp.json()[0]["success"] is False
+        assert resp.json()[0]["status"] == "not found"
+
+    async def test_bulk_resume_nonexistent(self, client):
+        resp = await client.post("/timers/bulk/resume", json={"timer_ids": ["nonexistent"]})
+        assert resp.status_code == 200
+        assert resp.json()[0]["success"] is False
+        assert resp.json()[0]["status"] == "not found"
+
+    async def test_bulk_stop_nonexistent(self, client):
+        resp = await client.post("/timers/bulk/stop", json={"timer_ids": ["nonexistent"]})
+        assert resp.status_code == 200
+        assert resp.json()[0]["success"] is False
+        assert resp.json()[0]["status"] == "not found"
+
+    async def test_bulk_extend_nonexistent(self, client):
+        resp = await client.post(
+            "/timers/bulk/extend", json={"timer_ids": ["nonexistent"], "seconds": 60}
+        )
+        assert resp.status_code == 200
+        assert resp.json()[0]["success"] is False
+        assert resp.json()[0]["status"] == "not found"
+
+
+# ============================================================
+# WEBSOCKET TESTS
+# ============================================================
+
+
+class TestWebSocket:
+    """Tests for the WebSocket endpoint."""
+
+    def test_connect_receives_initial_state(self):
+        timer = manager.create_timer(duration_seconds=300, name="WS Test")
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "connected"
+            assert data["timer"]["id"] == timer.id
+            assert data["timer"]["remaining_seconds"] == 300
+            assert data["timer"]["name"] == "WS Test"
+
+    def test_connect_nonexistent_timer(self):
+        with StarletteTestClient(app) as tc:  # noqa: SIM117
+            with pytest.raises(Exception):  # noqa: B017
+                with tc.websocket_connect("/ws/nonexistent") as ws:
+                    ws.receive_json()
+
+    def test_ping_pong(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            ws.send_json({"type": "ping"})
+            data = ws.receive_json()
+            assert data["type"] == "pong"
+
+    def test_sync_request(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            ws.send_json({"type": "sync"})
+            data = ws.receive_json()
+            assert data["type"] == "sync_response"
+            assert "server_time" in data
+            assert data["remaining_seconds"] == 300
+            assert data["state"] == "created"
+
+    def test_unknown_message_type(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            ws.send_json({"type": "banana"})
+            data = ws.receive_json()
+            assert data["type"] == "error"
+            assert "Unknown message type: banana" in data["message"]
+
+    def test_timer_started_broadcast(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.post(f"/timers/{timer.id}/control", json={"action": "start"})
+            msg = ws.receive_json()
+            assert msg["type"] == "timer_started"
+            assert msg["remaining_seconds"] == 300
+            tc.post(f"/timers/{timer.id}/control", json={"action": "stop"})
+
+    def test_timer_tick_broadcast(self):
+        timer = manager.create_timer(duration_seconds=3, warning_thresholds=[])
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.post(f"/timers/{timer.id}/control", json={"action": "start"})
+            ws.receive_json()  # timer_started
+            msg = ws.receive_json()  # first tick
+            assert msg["type"] == "timer_tick"
+            assert msg["remaining_seconds"] == 2
+            assert msg["elapsed_seconds"] == 1
+            tc.post(f"/timers/{timer.id}/control", json={"action": "stop"})
+
+    def test_warning_threshold_broadcast(self):
+        timer = manager.create_timer(duration_seconds=2, warning_thresholds=[1])
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.post(f"/timers/{timer.id}/control", json={"action": "start"})
+            ws.receive_json()  # timer_started
+            # After 1 second: remaining=1, threshold fires
+            msg = ws.receive_json()
+            assert msg["type"] == "timer_warning"
+            assert msg["threshold"] == 1
+            assert msg["remaining_seconds"] == 1
+
+    def test_timer_expired_broadcast(self):
+        timer = manager.create_timer(duration_seconds=2, warning_thresholds=[])
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.post(f"/timers/{timer.id}/control", json={"action": "start"})
+            messages = []
+            for _ in range(6):
+                msg = ws.receive_json()
+                messages.append(msg)
+                if msg["type"] == "timer_expired":
+                    break
+            types = [m["type"] for m in messages]
+            assert "timer_expired" in types
+
+    def test_timer_paused_broadcast(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.post(f"/timers/{timer.id}/control", json={"action": "start"})
+            ws.receive_json()  # timer_started
+            tc.post(f"/timers/{timer.id}/control", json={"action": "pause"})
+            msg = ws.receive_json()
+            assert msg["type"] == "timer_paused"
+            assert "remaining_seconds" in msg
+
+    def test_timer_extended_broadcast(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.post(
+                f"/timers/{timer.id}/control",
+                json={"action": "extend", "extend_seconds": 60},
+            )
+            msg = ws.receive_json()
+            assert msg["type"] == "timer_extended"
+            assert msg["added_seconds"] == 60
+            assert msg["remaining_seconds"] == 360
+
+    def test_timer_stopped_broadcast(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.post(f"/timers/{timer.id}/control", json={"action": "start"})
+            ws.receive_json()  # timer_started
+            tc.post(f"/timers/{timer.id}/control", json={"action": "stop"})
+            msg = ws.receive_json()
+            assert msg["type"] == "timer_stopped"
+            assert "remaining_seconds" in msg
+            assert "elapsed_seconds" in msg
+
+    def test_timer_deleted_broadcast(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            tc.delete(f"/timers/{timer.id}")
+            msg = ws.receive_json()
+            assert msg["type"] == "timer_deleted"
+
+    def test_client_tracked_on_connect(self):
+        timer = manager.create_timer(duration_seconds=300)
+        with StarletteTestClient(app) as tc, tc.websocket_connect(f"/ws/{timer.id}") as ws:
+            ws.receive_json()  # connected
+            assert len(timer.clients) == 1

@@ -5,8 +5,8 @@ Server-authoritative timer system for proctored testing. All clients receive syn
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green)
 ![WebSocket](https://img.shields.io/badge/WebSocket-Real--time-orange)
-![Tests](https://img.shields.io/badge/Tests-66_passing-brightgreen)
-![Coverage](https://img.shields.io/badge/Coverage-83%25-yellow)
+![Tests](https://img.shields.io/badge/Tests-85_passing-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-96%25-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 ## Why This Exists
@@ -296,7 +296,7 @@ ruff check src/ tests/
 ruff format --check src/ tests/
 ```
 
-**Current:** 66 tests passing, 83% coverage.
+**Current:** 85 tests passing, 96% coverage.
 
 ## Configuration
 
